@@ -15,6 +15,11 @@
 from collections.abc import Callable, Iterator
 import logging
 
+try:
+    from opentelemetry import trace as _otel_trace  # noqa: F401
+except ImportError:
+    _otel_trace = None  # type: ignore[assignment]
+
 from kubeflow.common.types import KubernetesBackendConfig
 from kubeflow.trainer.backends.container.backend import ContainerBackend
 from kubeflow.trainer.backends.container.types import ContainerBackendConfig
@@ -23,10 +28,14 @@ from kubeflow.trainer.backends.localprocess.backend import (
     LocalProcessBackend,
     LocalProcessBackendConfig,
 )
+from kubeflow.trainer.api._telemetry import get_tracer
 from kubeflow.trainer.constants import constants
 from kubeflow.trainer.types import types
 
 logger = logging.getLogger(__name__)
+
+# TODO: move this to a proper telemetry module once design is settled
+_tracer = get_tracer()
 
 
 class TrainerClient:
@@ -141,12 +150,22 @@ class TrainerClient:
             TimeoutError: Timeout to create TrainJobs.
             RuntimeError: Failed to create TrainJobs.
         """
-        return self.backend.train(
-            runtime=runtime,
-            initializer=initializer,
-            trainer=trainer,
-            options=options,
-        )
+        with _tracer.start_as_current_span("kubeflow.trainer.train") as span:
+            try:
+                job_name = self.backend.train(
+                    runtime=runtime,
+                    initializer=initializer,
+                    trainer=trainer,
+                    options=options,
+                )
+                span.set_attribute("kubeflow.job.name", job_name)
+                # TODO: set runtime name -- need to handle both str and Runtime object
+                return job_name
+            except Exception as e:
+                if _otel_trace is not None:
+                    span.record_exception(e)
+                    span.set_status(_otel_trace.StatusCode.ERROR, str(e))
+                raise
 
     def list_jobs(self, runtime: types.Runtime | None = None) -> list[types.TrainJob]:
         """List of the created TrainJobs. If a runtime is specified, only TrainJobs associated with
