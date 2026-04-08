@@ -15,27 +15,19 @@
 from collections.abc import Callable, Iterator
 import logging
 
-try:
-    from opentelemetry import trace as _otel_trace  # noqa: F401
-except ImportError:
-    _otel_trace = None  # type: ignore[assignment]
+from opentelemetry.trace import Status, StatusCode
 
+from kubeflow.common.telemetry import KUBEFLOW_JOB_NAME, _get_tracer
 from kubeflow.common.types import KubernetesBackendConfig
 from kubeflow.trainer.backends.container.backend import ContainerBackend
 from kubeflow.trainer.backends.container.types import ContainerBackendConfig
 from kubeflow.trainer.backends.kubernetes.backend import KubernetesBackend
-from kubeflow.trainer.backends.localprocess.backend import (
-    LocalProcessBackend,
-    LocalProcessBackendConfig,
-)
-from kubeflow.trainer.api._telemetry import get_tracer
+from kubeflow.trainer.backends.localprocess.backend import LocalProcessBackend
+from kubeflow.trainer.backends.localprocess.types import LocalProcessBackendConfig
 from kubeflow.trainer.constants import constants
 from kubeflow.trainer.types import types
 
 logger = logging.getLogger(__name__)
-
-# TODO: move this to a proper telemetry module once design is settled
-_tracer = get_tracer()
 
 
 class TrainerClient:
@@ -150,7 +142,11 @@ class TrainerClient:
             TimeoutError: Timeout to create TrainJobs.
             RuntimeError: Failed to create TrainJobs.
         """
-        with _tracer.start_as_current_span("kubeflow.trainer.train") as span:
+        with _get_tracer().start_as_current_span(
+            "TrainerClient.train",
+            record_exception=False,
+            set_status_on_exception=False,
+        ) as span:
             try:
                 job_name = self.backend.train(
                     runtime=runtime,
@@ -158,13 +154,11 @@ class TrainerClient:
                     trainer=trainer,
                     options=options,
                 )
-                span.set_attribute("kubeflow.job.name", job_name)
-                # TODO: set runtime name -- need to handle both str and Runtime object
+                span.set_attribute(KUBEFLOW_JOB_NAME, job_name)
                 return job_name
-            except Exception as e:
-                if _otel_trace is not None:
-                    span.record_exception(e)
-                    span.set_status(_otel_trace.StatusCode.ERROR, str(e))
+            except Exception as exc:
+                span.record_exception(exc)
+                span.set_status(Status(StatusCode.ERROR, str(exc)))
                 raise
 
     def list_jobs(self, runtime: types.Runtime | None = None) -> list[types.TrainJob]:
